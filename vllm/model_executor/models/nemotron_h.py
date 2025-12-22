@@ -201,7 +201,7 @@ class NemotronHMoE(nn.Module):
             is_sequence_parallel=self.is_sequence_parallel,
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, moe_layer_num: int) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -212,7 +212,7 @@ class NemotronHMoE(nn.Module):
         router_logits, _ = self.gate(hidden_states.to(dtype=torch.float32))
 
         fused_moe_out = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
+            hidden_states=hidden_states, router_logits=router_logits, moe_layer_num=moe_layer_num
         )
 
         shared_output, final_hidden_states = fused_moe_out
@@ -319,6 +319,7 @@ class NemotronHMoEDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        moe_layer_num: int,
         **kwargs,
     ):
         if residual is None:
@@ -327,7 +328,7 @@ class NemotronHMoEDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.norm(hidden_states, residual)
 
-        hidden_states = self.mixer(hidden_states)
+        hidden_states = self.mixer(hidden_states, moe_layer_num)
         return hidden_states, residual
 
 
@@ -569,12 +570,22 @@ class NemotronHModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        moe_layer_num = 0
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
-            )
+            if isinstance(layer, NemotronHMoEDecoderLayer):
+                hidden_states, residual = layer(
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    residual=residual,
+                    moe_layer_num=moe_layer_num,
+                )
+                moe_layer_num += 1
+            else:
+                hidden_states, residual = layer(
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    residual=residual,
+                )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
