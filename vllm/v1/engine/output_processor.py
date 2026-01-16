@@ -37,6 +37,53 @@ from vllm.v1.metrics.stats import (
 EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
 
 
+def _slice_moe_hidden_states(
+    states: list[torch.Tensor] | None,
+    start: int,
+    end: int,
+) -> list[torch.Tensor] | None:
+    if states is None:
+        return None
+    if not states:
+        return []
+    return [state[start:end] for state in states]
+
+
+def _slice_moe_router_outputs(
+    outputs: list[FusedMoERouterOutput] | None,
+    start: int,
+    end: int,
+) -> list[FusedMoERouterOutput] | None:
+    if outputs is None:
+        return None
+    if not outputs:
+        return []
+    return [
+        FusedMoERouterOutput(
+            topk_weights=output.topk_weights[start:end],
+            topk_ids=output.topk_ids[start:end],
+        )
+        for output in outputs
+    ]
+
+
+def _get_moe_num_tokens(
+    moe_input_hidden_states: list[torch.Tensor] | None,
+    moe_output_hidden_states: list[torch.Tensor] | None,
+    moe_router_outputs: list[FusedMoERouterOutput] | None,
+) -> int:
+    for states in (moe_input_hidden_states, moe_output_hidden_states):
+        if states is not None:
+            if not states:
+                return 0
+            return int(states[0].shape[0])
+    if moe_router_outputs is not None:
+        if not moe_router_outputs:
+            return 0
+        return int(moe_router_outputs[0].topk_weights.shape[0])
+    return 0
+
+
 class RequestOutputCollector:
     """
     Collects streamed RequestOutputs per individual request,
@@ -146,6 +193,7 @@ class RequestState:
         # Stream Interval
         self.stream_interval = stream_interval
         self.sent_tokens_offset = 0  # Offset of sent tokens
+        self.sent_moe_tokens_offset = 0  # Offset of sent MoE tokens
 
     @classmethod
     def from_new_request(
@@ -252,6 +300,33 @@ class RequestState:
 
         external_req_id = self.external_req_id
 
+        moe_input_hidden_states_to_send = moe_input_hidden_states
+        moe_output_hidden_states_to_send = moe_output_hidden_states
+        moe_router_outputs_to_send = moe_router_outputs
+        if self.output_kind == RequestOutputKind.DELTA:
+            total_moe_tokens = _get_moe_num_tokens(
+                moe_input_hidden_states,
+                moe_output_hidden_states,
+                moe_router_outputs,
+            )
+            if total_moe_tokens > self.sent_moe_tokens_offset:
+                start = self.sent_moe_tokens_offset
+                end = total_moe_tokens
+                moe_input_hidden_states_to_send = _slice_moe_hidden_states(
+                    moe_input_hidden_states, start, end
+                )
+                moe_output_hidden_states_to_send = _slice_moe_hidden_states(
+                    moe_output_hidden_states, start, end
+                )
+                moe_router_outputs_to_send = _slice_moe_router_outputs(
+                    moe_router_outputs, start, end
+                )
+                self.sent_moe_tokens_offset = end
+            else:
+                moe_input_hidden_states_to_send = None
+                moe_output_hidden_states_to_send = None
+                moe_router_outputs_to_send = None
+
         if pooling_output is not None:
             return self._new_request_output(
                 external_req_id,
@@ -264,9 +339,9 @@ class RequestState:
             finish_reason,
             stop_reason,
             routed_experts,
-            moe_input_hidden_states,
-            moe_output_hidden_states,
-            moe_router_outputs,
+            moe_input_hidden_states_to_send,
+            moe_output_hidden_states_to_send,
+            moe_router_outputs_to_send,
         )
 
         if self.parent_req is None:

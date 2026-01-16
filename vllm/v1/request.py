@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
+from vllm.model_executor.layers.fused_moe.router_output import FusedMoERouterOutput
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -128,6 +129,11 @@ class Request:
 
         # The number of tokens that have been computed remotely.
         self.num_external_computed_tokens = 0
+
+        # MoE outputs aggregated across scheduled tokens.
+        self.moe_input_hidden_states: list[torch.Tensor] | None = None
+        self.moe_output_hidden_states: list[torch.Tensor] | None = None
+        self.moe_router_outputs: list[FusedMoERouterOutput] | None = None
 
         self.block_hashes: list[BlockHash] = []
         self.get_hash_new_full_blocks: Callable[[], list[BlockHash]] | None = None

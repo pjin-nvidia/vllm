@@ -32,6 +32,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.model_executor.layers.fused_moe.router_output import FusedMoERouterOutput
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.sampling_params import RequestOutputKind
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -823,6 +824,9 @@ class Scheduler(SchedulerInterface):
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
         request.spec_token_ids.clear()
+        request.moe_input_hidden_states = None
+        request.moe_output_hidden_states = None
+        request.moe_router_outputs = None
         request.num_preemptions += 1
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
@@ -1162,6 +1166,111 @@ class Scheduler(SchedulerInterface):
                 for output in outputs
             ]
 
+        def _append_moe_hidden_states(
+            existing: list[torch.Tensor] | None,
+            new: list[torch.Tensor] | None,
+        ) -> list[torch.Tensor] | None:
+            if new is None:
+                return existing
+            if existing is None:
+                return list(new)
+            if not existing:
+                return list(new) if new else []
+            if not new:
+                return existing
+            if len(existing) != len(new):
+                logger.warning_once(
+                    "Mismatched MoE hidden states lengths while aggregating."
+                )
+                return list(new)
+            return [
+                torch.cat((left, right), dim=0)
+                for left, right in zip(existing, new)
+            ]
+
+        def _append_moe_router_outputs(
+            existing: list[FusedMoERouterOutput] | None,
+            new: list[FusedMoERouterOutput] | None,
+        ) -> list[FusedMoERouterOutput] | None:
+            if new is None:
+                return existing
+            if existing is None:
+                return list(new)
+            if not existing:
+                return list(new) if new else []
+            if not new:
+                return existing
+            if len(existing) != len(new):
+                logger.warning_once(
+                    "Mismatched MoE router outputs lengths while aggregating."
+                )
+                return list(new)
+            return [
+                FusedMoERouterOutput(
+                    topk_weights=torch.cat(
+                        (left.topk_weights, right.topk_weights), dim=0
+                    ),
+                    topk_ids=torch.cat((left.topk_ids, right.topk_ids), dim=0),
+                )
+                for left, right in zip(existing, new)
+            ]
+
+        def _trim_moe_hidden_states(
+            states: list[torch.Tensor] | None,
+            num_rejected: int,
+        ) -> list[torch.Tensor] | None:
+            if states is None:
+                return None
+            if not states or num_rejected <= 0:
+                return states
+            trimmed: list[torch.Tensor] = []
+            for state in states:
+                keep = max(state.shape[0] - num_rejected, 0)
+                trimmed.append(state[:keep])
+            return trimmed
+
+        def _trim_moe_router_outputs(
+            outputs: list[FusedMoERouterOutput] | None,
+            num_rejected: int,
+        ) -> list[FusedMoERouterOutput] | None:
+            if outputs is None:
+                return None
+            if not outputs or num_rejected <= 0:
+                return outputs
+            trimmed: list[FusedMoERouterOutput] = []
+            for output in outputs:
+                keep = max(output.topk_weights.shape[0] - num_rejected, 0)
+                trimmed.append(
+                    FusedMoERouterOutput(
+                        topk_weights=output.topk_weights[:keep],
+                        topk_ids=output.topk_ids[:keep],
+                    )
+                )
+            return trimmed
+
+        def _get_moe_num_tokens(request: Request) -> int:
+            for states in (
+                request.moe_input_hidden_states,
+                request.moe_output_hidden_states,
+            ):
+                if states is not None:
+                    if not states:
+                        return 0
+                    return int(states[0].shape[0])
+            outputs = request.moe_router_outputs
+            if outputs is not None:
+                if not outputs:
+                    return 0
+                return int(outputs[0].topk_weights.shape[0])
+            return 0
+
+        def _get_output_kind(request: Request) -> RequestOutputKind:
+            if request.sampling_params is not None:
+                return request.sampling_params.output_kind
+            if request.pooling_params is not None:
+                return request.pooling_params.output_kind
+            return RequestOutputKind.FINAL_ONLY
+
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
         kv_connector_stats: KVConnectorStats | None = (
@@ -1199,20 +1308,32 @@ class Scheduler(SchedulerInterface):
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
-            moe_input_hidden_states_req = None
-            moe_output_hidden_states_req = None
-            moe_router_outputs_req = None
+            moe_input_hidden_states_step = None
+            moe_output_hidden_states_step = None
+            moe_router_outputs_step = None
             if moe_token_offsets is not None:
                 start = int(moe_token_offsets[req_index])
                 end = start + num_tokens_scheduled
-                moe_input_hidden_states_req = _slice_moe_hidden_states(
+                moe_input_hidden_states_step = _slice_moe_hidden_states(
                     moe_input_hidden_states, start, end
                 )
-                moe_output_hidden_states_req = _slice_moe_hidden_states(
+                moe_output_hidden_states_step = _slice_moe_hidden_states(
                     moe_output_hidden_states, start, end
                 )
-                moe_router_outputs_req = _slice_moe_router_outputs(
+                moe_router_outputs_step = _slice_moe_router_outputs(
                     moe_router_outputs, start, end
+                )
+                request.moe_input_hidden_states = _append_moe_hidden_states(
+                    request.moe_input_hidden_states,
+                    moe_input_hidden_states_step,
+                )
+                request.moe_output_hidden_states = _append_moe_hidden_states(
+                    request.moe_output_hidden_states,
+                    moe_output_hidden_states_step,
+                )
+                request.moe_router_outputs = _append_moe_router_outputs(
+                    request.moe_router_outputs,
+                    moe_router_outputs_step,
                 )
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
@@ -1223,8 +1344,8 @@ class Scheduler(SchedulerInterface):
             )
             if scheduled_spec_token_ids:
                 num_draft_tokens = len(scheduled_spec_token_ids)
-                num_accepted = len(generated_token_ids) - 1
-                num_rejected = num_draft_tokens - num_accepted
+                num_accepted = max(len(generated_token_ids) - 1, 0)
+                num_rejected = max(num_draft_tokens - num_accepted, 0)
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,
@@ -1236,6 +1357,19 @@ class Scheduler(SchedulerInterface):
                 # the scheduled spec tokens count and so is similarly adjusted.
                 if request.num_output_placeholders > 0:
                     request.num_output_placeholders -= num_rejected
+                if num_rejected > 0:
+                    request.moe_input_hidden_states = _trim_moe_hidden_states(
+                        request.moe_input_hidden_states,
+                        num_rejected,
+                    )
+                    request.moe_output_hidden_states = _trim_moe_hidden_states(
+                        request.moe_output_hidden_states,
+                        num_rejected,
+                    )
+                    request.moe_router_outputs = _trim_moe_router_outputs(
+                        request.moe_router_outputs,
+                        num_rejected,
+                    )
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,
@@ -1325,6 +1459,24 @@ class Scheduler(SchedulerInterface):
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if new_token_ids or pooler_output is not None or kv_transfer_params:
+                moe_input_hidden_states_req = None
+                moe_output_hidden_states_req = None
+                moe_router_outputs_req = None
+                output_kind = _get_output_kind(request)
+                include_moe = (
+                    output_kind != RequestOutputKind.FINAL_ONLY or stopped
+                )
+                total_moe_tokens = _get_moe_num_tokens(request)
+                if include_moe and total_moe_tokens:
+                    moe_input_hidden_states_req = _slice_moe_hidden_states(
+                        request.moe_input_hidden_states, 0, total_moe_tokens
+                    )
+                    moe_output_hidden_states_req = _slice_moe_hidden_states(
+                        request.moe_output_hidden_states, 0, total_moe_tokens
+                    )
+                    moe_router_outputs_req = _slice_moe_router_outputs(
+                        request.moe_router_outputs, 0, total_moe_tokens
+                    )
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
@@ -1874,6 +2026,30 @@ class Scheduler(SchedulerInterface):
                 - blocks_to_evict (set[int]): Block IDs to evict from cache,
                 including invalid blocks and downstream dependent blocks.
         """
+        def _trim_moe_outputs(request: Request) -> None:
+            num_tokens = request.num_computed_tokens
+            if request.moe_input_hidden_states is not None:
+                if request.moe_input_hidden_states:
+                    request.moe_input_hidden_states = [
+                        state[:num_tokens]
+                        for state in request.moe_input_hidden_states
+                    ]
+            if request.moe_output_hidden_states is not None:
+                if request.moe_output_hidden_states:
+                    request.moe_output_hidden_states = [
+                        state[:num_tokens]
+                        for state in request.moe_output_hidden_states
+                    ]
+            if request.moe_router_outputs is not None:
+                if request.moe_router_outputs:
+                    request.moe_router_outputs = [
+                        FusedMoERouterOutput(
+                            topk_weights=output.topk_weights[:num_tokens],
+                            topk_ids=output.topk_ids[:num_tokens],
+                        )
+                        for output in request.moe_router_outputs
+                    ]
+
         affected_req_ids: set[str] = set()
         total_affected_tokens = 0
         blocks_to_evict: set[int] = set()
@@ -1929,6 +2105,7 @@ class Scheduler(SchedulerInterface):
                 marked_invalid_block = True
                 # Truncate the computed tokens at the first failed block
                 request.num_computed_tokens = idx * self.block_size
+                _trim_moe_outputs(request)
                 num_affected_tokens = (
                     req_num_computed_tokens - request.num_computed_tokens
                 )
@@ -1949,6 +2126,7 @@ class Scheduler(SchedulerInterface):
                         request.num_computed_tokens - request.num_cached_tokens
                     )
                     request.num_computed_tokens = request.num_cached_tokens
+                    _trim_moe_outputs(request)
 
                 affected_req_ids.add(request.request_id)
 
