@@ -656,14 +656,14 @@ class NemotronHModel(nn.Module):
                 ),
                 # moe_input_hidden_states=moe_input_hidden_states,
                 # moe_output_hidden_states=moe_output_hidden_states,
-                moe_router_outputs=moe_router_outputs,
+                # moe_router_outputs=moe_router_outputs,
             )
         hidden_states, _ = self.norm_f(hidden_states, residual)
         return NemotronHForwardOutput(
             hidden_states=hidden_states,
             # moe_input_hidden_states=moe_input_hidden_states,
             # moe_output_hidden_states=moe_output_hidden_states,
-            moe_router_outputs=moe_router_outputs,
+            # moe_router_outputs=moe_router_outputs,
         )
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:

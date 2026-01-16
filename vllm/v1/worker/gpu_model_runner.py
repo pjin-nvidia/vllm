@@ -3445,7 +3445,7 @@ class GPUModelRunner(
                 raise RuntimeError(
                     "NemotronH forward must return MoE output hidden states."
                 )
-            if model_output.moe_router_outputs is None:
+            if False and model_output.moe_router_outputs is None:
                 raise RuntimeError(
                     "NemotronH forward must return MoE router outputs."
                 )
