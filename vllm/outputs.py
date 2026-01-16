@@ -45,6 +45,7 @@ class CompletionOutput:
     cumulative_logprob: float | None
     logprobs: SampleLogprobs | None
     routed_experts: np.ndarray | None = None  # [seq_len,layer_num,topk]
+    alt_routed_experts: np.ndarray | None = None  # [seq_len,layer_num,topk]
     moe_input_hidden_states: list[torch.Tensor] | None = None
     moe_output_hidden_states: list[torch.Tensor] | None = None
     moe_router_outputs: list[FusedMoERouterOutput] | None = None

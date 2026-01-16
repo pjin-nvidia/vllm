@@ -654,15 +654,15 @@ class NemotronHModel(nn.Module):
                 hidden_states=IntermediateTensors(
                     {"hidden_states": hidden_states, "residual": residual}
                 ),
-                moe_input_hidden_states=moe_input_hidden_states,
-                moe_output_hidden_states=moe_output_hidden_states,
+                # moe_input_hidden_states=moe_input_hidden_states,
+                # moe_output_hidden_states=moe_output_hidden_states,
                 moe_router_outputs=moe_router_outputs,
             )
         hidden_states, _ = self.norm_f(hidden_states, residual)
         return NemotronHForwardOutput(
             hidden_states=hidden_states,
-            moe_input_hidden_states=moe_input_hidden_states,
-            moe_output_hidden_states=moe_output_hidden_states,
+            # moe_input_hidden_states=moe_input_hidden_states,
+            # moe_output_hidden_states=moe_output_hidden_states,
             moe_router_outputs=moe_router_outputs,
         )
 

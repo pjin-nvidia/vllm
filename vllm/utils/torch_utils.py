@@ -621,11 +621,12 @@ def weak_ref_tensor(tensor: Any) -> Any:
 
 
 def weak_ref_tensors(
-    tensors: torch.Tensor
-    | list[torch.Tensor]
-    | tuple[torch.Tensor]
-    | IntermediateTensors
-    | "ModelForwardOutput",
+    tensors
+    #tensors: torch.Tensor
+    #| list[torch.Tensor]
+    #| tuple[torch.Tensor]
+    #| IntermediateTensors
+    #| "ModelForwardOutput",
 ) -> torch.Tensor | list[Any] | tuple[Any] | Any:
     """
     Convenience function to create weak references to tensors,

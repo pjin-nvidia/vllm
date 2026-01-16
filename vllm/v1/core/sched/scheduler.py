@@ -1335,6 +1335,10 @@ class Scheduler(SchedulerInterface):
                     request.moe_router_outputs,
                     moe_router_outputs_step,
                 )
+            if moe_router_outputs_step is not None:
+                logger.info(f"Scheduler.update_from_output: moe_router_outputs_step len      = {len(moe_router_outputs_step)}")
+            if moe_router_outputs_step:
+                logger.info(f"Scheduler.update_from_output: moe_router_outputs_step[0] shape = {moe_router_outputs_step[0].topk_ids.shape}")
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
@@ -1423,7 +1427,7 @@ class Scheduler(SchedulerInterface):
                         slot_mapping.append(block_ids[0] * kv_block_size + pos)
                     slot_mapping = np.array(slot_mapping, dtype=np.int64)
 
-                # if False:
+                if False:
                     routed_experts = self.routed_experts_reader.get_routed_experts(
                         indices=slot_mapping
                     )
@@ -1477,6 +1481,23 @@ class Scheduler(SchedulerInterface):
                     moe_router_outputs_req = _slice_moe_router_outputs(
                         request.moe_router_outputs, 0, total_moe_tokens
                     )
+                if moe_router_outputs_req is not None:
+                    logger.info(f"Scheduler.update_from_output: moe_router_outputs_req      len = {len(moe_router_outputs_req)}")
+                if moe_router_outputs_req:
+                    logger.info(f"Scheduler.update_from_output: moe_router_outputs_req[0] shape = {moe_router_outputs_req[0].topk_ids.shape}")
+                    logger.info(f"Scheduler.update_from_output: moe_router_outputs_req[0] data0 = {moe_router_outputs_req[0].topk_ids[:10,:]}")
+                    logger.info(f"Scheduler.update_from_output: moe_router_outputs_req[0] data- = {moe_router_outputs_req[0].topk_ids[-10:,:]}")
+                if routed_experts is not None:
+                    logger.info(f"Scheduler.update_from_output: captured routed experts   shape = {routed_experts.shape}")
+                    logger.info(f"Scheduler.update_from_output: captured routed experts   data0 = {routed_experts[:10,1,:]}")
+                    logger.info(f"Scheduler.update_from_output: captured routed experts   data- = {routed_experts[-10:,1,:]}")
+                alt_routed_experts = None
+                if moe_router_outputs_req:
+                    topk_ids = torch.stack([output.topk_ids for output in moe_router_outputs_req])
+                    logger.info(f"Scheduler.update_from_output: stacked topk ids          shape = {topk_ids.shape}")
+                    topk_ids = torch.transpose(topk_ids, 0, 1)
+                    logger.info(f"Scheduler.update_from_output: transposed topk ids       shape = {topk_ids.shape}")
+                    alt_routed_experts = topk_ids
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
@@ -1492,6 +1513,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                         routed_experts=routed_experts,
+                        alt_routed_experts=alt_routed_experts,
                         moe_input_hidden_states=moe_input_hidden_states_req,
                         moe_output_hidden_states=moe_output_hidden_states_req,
                         moe_router_outputs=moe_router_outputs_req,

@@ -145,6 +145,7 @@ class EngineCoreOutput(
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
     routed_experts: np.ndarray | None = None
+    alt_routed_experts: np.ndarray | None = None
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0

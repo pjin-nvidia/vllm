@@ -3436,11 +3436,11 @@ class GPUModelRunner(
                 raise RuntimeError(
                     "NemotronH forward must return ModelForwardOutput."
                 )
-            if model_output.moe_input_hidden_states is None:
+            if False and model_output.moe_input_hidden_states is None:
                 raise RuntimeError(
                     "NemotronH forward must return MoE input hidden states."
                 )
-            if model_output.moe_output_hidden_states is None:
+            if False and model_output.moe_output_hidden_states is None:
                 raise RuntimeError(
                     "NemotronH forward must return MoE output hidden states."
                 )
@@ -3670,13 +3670,22 @@ class GPUModelRunner(
 
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
             if self.model_config.enable_return_routed_experts:
+                cap_data = None
                 capturer = RoutedExpertsCapturer.get_instance()
-                if capturer is not None:
+                if False:
+                # if capturer is not None:
                     # logger.debug(f"GPUModelRunner.sample_tokens: save captured experts: indices = {self.slot_mapping}")
-                    capturer.save_captured_experts(indices=self.slot_mapping)  # noqa
-                else:
+                    cap_data = capturer.save_captured_experts(indices=self.slot_mapping)  # noqa
+                    logger.info("GPUModelRunner.sample_tokens: save captured experts")
+                elif False:
+                # else:
                     logger.error("RoutedExpertsCapturer not initialized.")
-                logger.info("GPUModelRunner.sample_tokens: save captured experts")
+                if cap_data is not None:
+                    logger.info(f"GPUModelRunner.sample_tokens: captured experts shape = {cap_data.shape}")
+                if moe_router_outputs is not None:
+                    logger.info(f"GPUModelRunner.sample_tokens: topk indices len       = {len(moe_router_outputs)}")
+                if moe_router_outputs:
+                    logger.info(f"GPUModelRunner.sample_tokens: topk indices [0] shape = {moe_router_outputs[0].topk_ids.shape}")
 
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
@@ -4647,10 +4656,8 @@ class GPUModelRunner(
                     **model_kwargs,
                 )
 
-            if self.use_aux_hidden_state_outputs:
-                hidden_states, _ = outputs
-            else:
-                hidden_states = outputs
+            logger.info(f"GPUModelRunner._dummy_run: model outputs type = {type(outputs).__name__}")
+            hidden_states, _ = self._unpack_model_output(outputs)
 
             if self.speculative_config and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)

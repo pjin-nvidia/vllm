@@ -264,6 +264,7 @@ class RequestState:
         stop_reason: int | str | None,
         kv_transfer_params: dict[str, Any] | None = None,
         routed_experts: np.ndarray | None = None,
+        alt_routed_experts: np.ndarray | None = None,
         moe_input_hidden_states: list[torch.Tensor] | None = None,
         moe_output_hidden_states: list[torch.Tensor] | None = None,
         moe_router_outputs: list[FusedMoERouterOutput] | None = None,
@@ -339,6 +340,7 @@ class RequestState:
             finish_reason,
             stop_reason,
             routed_experts,
+            alt_routed_experts,
             moe_input_hidden_states_to_send,
             moe_output_hidden_states_to_send,
             moe_router_outputs_to_send,
@@ -406,6 +408,7 @@ class RequestState:
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
         routed_experts: np.ndarray | None = None,
+        alt_routed_experts: np.ndarray | None = None,
         moe_input_hidden_states: list[torch.Tensor] | None = None,
         moe_output_hidden_states: list[torch.Tensor] | None = None,
         moe_router_outputs: list[FusedMoERouterOutput] | None = None,
@@ -430,6 +433,7 @@ class RequestState:
             text=text,
             token_ids=token_ids,
             routed_experts=routed_experts,
+            alt_routed_experts=alt_routed_experts,
             moe_input_hidden_states=moe_input_hidden_states,
             moe_output_hidden_states=moe_output_hidden_states,
             moe_router_outputs=moe_router_outputs,
@@ -625,6 +629,7 @@ class OutputProcessor:
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
             routed_experts = engine_core_output.routed_experts
+            alt_routed_experts = engine_core_output.alt_routed_experts
             moe_input_hidden_states = engine_core_output.moe_input_hidden_states
             moe_output_hidden_states = engine_core_output.moe_output_hidden_states
             moe_router_outputs = engine_core_output.moe_router_outputs
@@ -654,6 +659,7 @@ class OutputProcessor:
                 stop_reason,
                 kv_transfer_params,
                 routed_experts,
+                alt_routed_experts,
                 moe_input_hidden_states,
                 moe_output_hidden_states,
                 moe_router_outputs,

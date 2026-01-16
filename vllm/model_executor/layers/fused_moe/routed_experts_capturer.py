@@ -309,14 +309,14 @@ class RoutedExpertsCapturer:
         indices = np.asarray(indices)
         num_tokens = len(indices)
         if num_tokens == 0:
-            return
+            return None
 
         if True:
         # if not self._pinned_buffers or self._copy_stream is None:
             data = self._device_buffer[:num_tokens, :, :].cpu().numpy()
             logger.info(f"RoutedExpertsCapturer.save_captured_experts: unpin: indices = {indices} data shape = {data.shape}")
             self._write_to_host(indices, data)
-            return
+            return data
 
         buf_idx = self._next_buffer_idx
         self._next_buffer_idx = (self._next_buffer_idx + 1) % len(
@@ -331,6 +331,7 @@ class RoutedExpertsCapturer:
         data = buf[:num_tokens].numpy()
         logger.info(f"RoutedExpertsCapturer.save_captured_experts: pin: indices = {indices} data shape = {data.shape}")
         self._write_to_host(indices, data)
+        return None
 
     def _write_to_host(self, indices: np.ndarray, data: np.ndarray) -> None:
         if self._host_buffer_view is None:
