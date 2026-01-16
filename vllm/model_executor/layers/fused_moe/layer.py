@@ -1616,6 +1616,8 @@ class FusedMoE(CustomOp):
         # DeepSeekv2 uses grouped_top_k
         elif self.use_grouped_topk and valid_grouping():
             assert self._grouped_topk_impl is not None
+            # NemotronH uses grouped_topk, which computes top-k expert ids
+            # within expert groups and returns the final top-k indices.
             topk_weights, topk_ids = self._grouped_topk_impl(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
@@ -1632,6 +1634,7 @@ class FusedMoE(CustomOp):
             if self.routed_scaling_factor != 1.0:
                 topk_weights *= self.routed_scaling_factor
         elif self.custom_routing_function is None:
+            # Default path: fused topk kernel returns per-token top-k ids.
             topk_weights, topk_ids, token_expert_indices = fused_topk(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
