@@ -22,7 +22,11 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.distributed.eplb.eplb_state import EplbState
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import (
+    ForwardContext,
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
@@ -72,6 +76,10 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
+)
+from vllm.model_executor.layers.fused_moe.router_output import (
+    FusedMoEForwardOutput,
+    FusedMoERouterOutput,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
@@ -1704,6 +1712,19 @@ class FusedMoE(CustomOp):
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
 
+    def _record_router_output(
+        self,
+        router_output: FusedMoERouterOutput,
+    ) -> None:
+        if not is_forward_context_available():
+            return
+        forward_context = get_forward_context()
+        router_outputs = forward_context.additional_kwargs.setdefault(
+            "fused_moe_router_outputs",
+            [],
+        )
+        router_outputs.append(router_output)
+
     def forward_native(
         self,
         hidden_states: torch.Tensor,
@@ -1787,8 +1808,11 @@ class FusedMoE(CustomOp):
         full_fused_final_hidden_states = torch.empty_like(full_hidden_states)
         if self.shared_experts is not None:
             full_shared_final_hidden_states = torch.empty_like(full_hidden_states)
+        full_topk_weights: torch.Tensor | None = None
+        full_topk_ids: torch.Tensor | None = None
 
         def process_chunk(chunk_start, chunk_end, skip_result_store=False):
+            nonlocal full_topk_weights, full_topk_ids
             chunk_size = chunk_end - chunk_start
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
@@ -1826,6 +1850,33 @@ class FusedMoE(CustomOp):
                 x=staged_hidden_states,
                 router_logits=staged_router_logits,
             )
+            router_output: FusedMoERouterOutput | None = None
+            if isinstance(final_hidden_states, FusedMoEForwardOutput):
+                router_output = final_hidden_states.router_output
+                final_hidden_states = final_hidden_states.output
+
+            if router_output is not None and not skip_result_store:
+                if full_topk_weights is None:
+                    full_topk_weights = torch.empty(
+                        (full_hidden_states.size(0),)
+                        + router_output.topk_weights.shape[1:],
+                        device=router_output.topk_weights.device,
+                        dtype=router_output.topk_weights.dtype,
+                    )
+                    full_topk_ids = torch.empty(
+                        (full_hidden_states.size(0),)
+                        + router_output.topk_ids.shape[1:],
+                        device=router_output.topk_ids.device,
+                        dtype=router_output.topk_ids.dtype,
+                    )
+                full_topk_weights[chunk_start:chunk_end].copy_(
+                    router_output.topk_weights[:chunk_size],
+                    non_blocking=True,
+                )
+                full_topk_ids[chunk_start:chunk_end].copy_(
+                    router_output.topk_ids[:chunk_size],
+                    non_blocking=True,
+                )
 
             if has_separate_shared_experts:
                 assert not isinstance(final_hidden_states, tuple)
@@ -1880,6 +1931,14 @@ class FusedMoE(CustomOp):
                 process_chunk(
                     chunk_start, chunk_end, skip_result_store=chunk_start_ >= num_tokens
                 )
+
+        if full_topk_weights is not None and full_topk_ids is not None:
+            self._record_router_output(
+                FusedMoERouterOutput(
+                    topk_weights=full_topk_weights,
+                    topk_ids=full_topk_ids,
+                )
+            )
 
         if self.shared_experts is None:
             return full_fused_final_hidden_states
@@ -2001,6 +2060,9 @@ class FusedMoE(CustomOp):
                 else hidden_states,
                 router_logits=router_logits,
             )
+            if isinstance(final_hidden_states, FusedMoEForwardOutput):
+                self._record_router_output(final_hidden_states.router_output)
+                final_hidden_states = final_hidden_states.output
 
             if has_separate_shared_experts:
                 assert self.shared_experts is not None

@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.model_executor.layers.fused_moe.router_output import FusedMoERouterOutput
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -101,6 +102,9 @@ class LogprobsTensors(NamedTuple):
 # The shape of each element depends on the pooler used
 PoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor] | list[torch.Tensor | None]
 
+MoeHiddenStates: TypeAlias = list[torch.Tensor] | None
+MoeRouterOutputs: TypeAlias = list[FusedMoERouterOutput] | None
+
 
 @dataclass
 class SamplerOutput:
@@ -176,6 +180,12 @@ class ModelRunnerOutput:
 
     # [num_reqs, hidden_size]
     pooler_output: list[torch.Tensor | None] | None = None
+    # [num_layers, num_scheduled_tokens, hidden_size]
+    moe_input_hidden_states: MoeHiddenStates = None
+    # [num_layers, num_scheduled_tokens, hidden_size]
+    moe_output_hidden_states: MoeHiddenStates = None
+    # [num_layers, num_scheduled_tokens, topk]
+    moe_router_outputs: MoeRouterOutputs = None
 
     kv_connector_output: KVConnectorOutput | None = None
 

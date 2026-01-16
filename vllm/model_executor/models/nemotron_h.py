@@ -32,6 +32,7 @@ from vllm.config.parallel import ParallelConfig
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
 from vllm.model_executor.layers.fused_moe.utils import activation_without_mul
@@ -66,6 +67,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
     SupportsQuant,
 )
+from vllm.model_executor.models.forward_output import ModelForwardOutput
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -77,6 +79,10 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import NemotronHConfig
+
+
+class NemotronHForwardOutput(ModelForwardOutput):
+    pass
 
 
 class NemotronHMLP(nn.Module):
@@ -603,7 +609,10 @@ class NemotronHModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> NemotronHForwardOutput:
+        moe_input_hidden_states: list[torch.Tensor] = []
+        moe_output_hidden_states: list[torch.Tensor] = []
+        moe_router_outputs = []
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -616,18 +625,46 @@ class NemotronHModel(nn.Module):
             residual = intermediate_tensors["residual"]
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
+            if isinstance(layer, NemotronHMoEDecoderLayer):
+                if residual is None:
+                    residual = hidden_states
+                    hidden_states = layer.norm(hidden_states)
+                else:
+                    hidden_states, residual = layer.norm(hidden_states, residual)
+                moe_input_hidden_states.append(hidden_states)
+                hidden_states = layer.mixer(hidden_states)
+                moe_output_hidden_states.append(hidden_states)
+                continue
+
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
             )
 
+        if is_forward_context_available():
+            router_outputs = get_forward_context().additional_kwargs.get(
+                "fused_moe_router_outputs"
+            )
+            if router_outputs:
+                moe_router_outputs = list(router_outputs)
+
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+            return NemotronHForwardOutput(
+                hidden_states=IntermediateTensors(
+                    {"hidden_states": hidden_states, "residual": residual}
+                ),
+                moe_input_hidden_states=moe_input_hidden_states,
+                moe_output_hidden_states=moe_output_hidden_states,
+                moe_router_outputs=moe_router_outputs,
             )
         hidden_states, _ = self.norm_f(hidden_states, residual)
-        return hidden_states
+        return NemotronHForwardOutput(
+            hidden_states=hidden_states,
+            moe_input_hidden_states=moe_input_hidden_states,
+            moe_output_hidden_states=moe_output_hidden_states,
+            moe_router_outputs=moe_router_outputs,
+        )
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         if self.has_moe:
@@ -883,12 +920,32 @@ class NemotronHForCausalLM(
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ):
-        hidden_states = self.model(
+    ) -> NemotronHForwardOutput:
+        model_output = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
 
-        return hidden_states
+        if isinstance(model_output, ModelForwardOutput):
+            return model_output
+        if hasattr(model_output, "hidden_states"):
+            return NemotronHForwardOutput(
+                hidden_states=model_output.hidden_states,
+                aux_hidden_states=getattr(model_output, "aux_hidden_states", None),
+                moe_input_hidden_states=getattr(
+                    model_output, "moe_input_hidden_states", None
+                ),
+                moe_output_hidden_states=getattr(
+                    model_output, "moe_output_hidden_states", None
+                ),
+                moe_router_outputs=getattr(model_output, "moe_router_outputs", None),
+            )
+        if isinstance(model_output, tuple) and len(model_output) == 2:
+            hidden_states, aux_hidden_states = model_output
+            return NemotronHForwardOutput(
+                hidden_states=hidden_states,
+                aux_hidden_states=aux_hidden_states,
+            )
+        return NemotronHForwardOutput(hidden_states=model_output)
 
     def compute_logits(
         self,

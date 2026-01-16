@@ -13,6 +13,7 @@ from typing_extensions import TypeVar
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.fused_moe.router_output import FusedMoERouterOutput
 from vllm.multimodal.inputs import MultiModalPlaceholderDict
 from vllm.v1.metrics.stats import RequestStateStats
 
@@ -44,6 +45,9 @@ class CompletionOutput:
     cumulative_logprob: float | None
     logprobs: SampleLogprobs | None
     routed_experts: np.ndarray | None = None  # [seq_len,layer_num,topk]
+    moe_input_hidden_states: list[torch.Tensor] | None = None
+    moe_output_hidden_states: list[torch.Tensor] | None = None
+    moe_router_outputs: list[FusedMoERouterOutput] | None = None
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
@@ -81,6 +85,54 @@ class PoolingOutput:
         return isinstance(other, self.__class__) and bool(
             (self.data == other.data).all()
         )
+
+
+def _concat_moe_hidden_states(
+    base: list[torch.Tensor] | None,
+    new: list[torch.Tensor] | None,
+) -> list[torch.Tensor] | None:
+    if base is None:
+        return new
+    if new is None:
+        return base
+    if not base:
+        return list(new)
+    if not new:
+        return base
+    if len(base) != len(new):
+        logger.warning_once(
+            "Mismatched MoE hidden states lengths for request output aggregation."
+        )
+        return new
+    return [torch.cat((left, right), dim=0) for left, right in zip(base, new)]
+
+
+def _concat_moe_router_outputs(
+    base: list[FusedMoERouterOutput] | None,
+    new: list[FusedMoERouterOutput] | None,
+) -> list[FusedMoERouterOutput] | None:
+    if base is None:
+        return new
+    if new is None:
+        return base
+    if not base:
+        return list(new)
+    if not new:
+        return base
+    if len(base) != len(new):
+        logger.warning_once(
+            "Mismatched MoE router outputs lengths for request output aggregation."
+        )
+        return new
+    return [
+        FusedMoERouterOutput(
+            topk_weights=torch.cat(
+                (left.topk_weights, right.topk_weights), dim=0
+            ),
+            topk_ids=torch.cat((left.topk_ids, right.topk_ids), dim=0),
+        )
+        for left, right in zip(base, new)
+    ]
 
 
 class RequestOutput:
@@ -163,6 +215,22 @@ class RequestOutput:
                         if next_completion.logprobs:
                             assert completion.logprobs is not None
                             completion.logprobs.extend(next_completion.logprobs)
+                        completion.moe_input_hidden_states = (
+                            _concat_moe_hidden_states(
+                                completion.moe_input_hidden_states,
+                                next_completion.moe_input_hidden_states,
+                            )
+                        )
+                        completion.moe_output_hidden_states = (
+                            _concat_moe_hidden_states(
+                                completion.moe_output_hidden_states,
+                                next_completion.moe_output_hidden_states,
+                            )
+                        )
+                        completion.moe_router_outputs = _concat_moe_router_outputs(
+                            completion.moe_router_outputs,
+                            next_completion.moe_router_outputs,
+                        )
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )

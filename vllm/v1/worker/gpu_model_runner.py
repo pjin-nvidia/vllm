@@ -50,6 +50,7 @@ from vllm.forward_context import (
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.fused_moe.router_output import FusedMoERouterOutput
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
 )
@@ -58,6 +59,7 @@ from vllm.model_executor.layers.rotary_embedding import (
     XDRotaryEmbedding,
 )
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
+from vllm.model_executor.models.forward_output import ModelForwardOutput
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMRoPE,
@@ -309,6 +311,9 @@ class ExecuteModelState(NamedTuple):
     hidden_states: torch.Tensor
     sample_hidden_states: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
+    moe_input_hidden_states: list[torch.Tensor] | None
+    moe_output_hidden_states: list[torch.Tensor] | None
+    moe_router_outputs: list[FusedMoERouterOutput] | None
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
 
@@ -2920,7 +2925,8 @@ class GPUModelRunner(
             **model_kwargs: Additional model arguments
 
         Returns:
-            Model output tensor
+            Model output tensor, tuple with aux hidden states, or a structured
+            output wrapper.
         """
         return self.model(
             input_ids=input_ids,
@@ -2929,6 +2935,132 @@ class GPUModelRunner(
             inputs_embeds=inputs_embeds,
             **model_kwargs,
         )
+
+    def _unpack_model_output(
+        self,
+        model_output: Any,
+    ) -> tuple[torch.Tensor | IntermediateTensors, list[torch.Tensor] | None]:
+        if isinstance(model_output, ModelForwardOutput):
+            return model_output.hidden_states, model_output.aux_hidden_states
+        if hasattr(model_output, "hidden_states"):
+            hidden_states = model_output.hidden_states
+            aux_hidden_states = getattr(model_output, "aux_hidden_states", None)
+            return hidden_states, aux_hidden_states
+        if (
+            self.use_aux_hidden_state_outputs
+            and isinstance(model_output, tuple)
+            and len(model_output) == 2
+        ):
+            hidden_states, aux_hidden_states = model_output
+            return hidden_states, aux_hidden_states
+        return model_output, None
+
+    def _maybe_copy_moe_outputs_to_cpu(
+        self,
+        model_output: Any,
+        num_tokens: int,
+    ) -> tuple[
+        list[torch.Tensor] | None,
+        list[torch.Tensor] | None,
+        list[FusedMoERouterOutput] | None,
+    ]:
+        moe_input_hidden_states = getattr(model_output, "moe_input_hidden_states", None)
+        moe_output_hidden_states = getattr(
+            model_output, "moe_output_hidden_states", None
+        )
+        moe_router_outputs = getattr(model_output, "moe_router_outputs", None)
+        if (
+            moe_input_hidden_states is None
+            and moe_output_hidden_states is None
+            and moe_router_outputs is None
+        ):
+            return None, None, None
+
+        def _slice_states(
+            states: list[torch.Tensor] | None,
+        ) -> list[torch.Tensor] | None:
+            if states is None:
+                return None
+            if not states:
+                return []
+            return [state[:num_tokens] for state in states]
+
+        def _slice_router_outputs(
+            outputs: list[FusedMoERouterOutput] | None,
+        ) -> list[FusedMoERouterOutput] | None:
+            if outputs is None:
+                return None
+            if not outputs:
+                return []
+            return [
+                FusedMoERouterOutput(
+                    topk_weights=output.topk_weights[:num_tokens],
+                    topk_ids=output.topk_ids[:num_tokens],
+                )
+                for output in outputs
+            ]
+
+        def _copy_states(
+            states: list[torch.Tensor] | None,
+        ) -> tuple[list[torch.Tensor] | None, bool]:
+            if states is None:
+                return None, False
+            if not states:
+                return [], False
+            copied: list[torch.Tensor] = []
+            needs_sync = False
+            for state in states:
+                if state.device.type == "cpu":
+                    copied.append(state)
+                else:
+                    copied.append(state.to("cpu", non_blocking=True))
+                    needs_sync = True
+            return copied, needs_sync
+
+        def _copy_router_outputs(
+            outputs: list[FusedMoERouterOutput] | None,
+        ) -> tuple[list[FusedMoERouterOutput] | None, bool]:
+            if outputs is None:
+                return None, False
+            if not outputs:
+                return [], False
+            copied: list[FusedMoERouterOutput] = []
+            needs_sync = False
+            for output in outputs:
+                topk_weights = output.topk_weights
+                topk_ids = output.topk_ids
+                if topk_weights.device.type != "cpu":
+                    topk_weights = topk_weights.to("cpu", non_blocking=True)
+                    needs_sync = True
+                if topk_ids.device.type != "cpu":
+                    topk_ids = topk_ids.to("cpu", non_blocking=True)
+                    needs_sync = True
+                copied.append(
+                    FusedMoERouterOutput(
+                        topk_weights=topk_weights,
+                        topk_ids=topk_ids,
+                    )
+                )
+            return copied, needs_sync
+
+        moe_input_hidden_states = _slice_states(moe_input_hidden_states)
+        moe_output_hidden_states = _slice_states(moe_output_hidden_states)
+        moe_router_outputs = _slice_router_outputs(moe_router_outputs)
+
+        moe_input_hidden_states, needs_sync_input = _copy_states(
+            moe_input_hidden_states
+        )
+        moe_output_hidden_states, needs_sync_output = _copy_states(
+            moe_output_hidden_states
+        )
+        moe_router_outputs, needs_sync_router = _copy_router_outputs(
+            moe_router_outputs
+        )
+
+        if needs_sync_input or needs_sync_output or needs_sync_router:
+            self._sync_device()
+
+        return moe_input_hidden_states, moe_output_hidden_states, moe_router_outputs
 
     @staticmethod
     def _is_uniform_decode(
@@ -3299,14 +3431,29 @@ class GPUModelRunner(
                 **model_kwargs,
             )
 
+        if getattr(self.model_config.hf_config, "model_type", None) == "nemotron_h":
+            if not isinstance(model_output, ModelForwardOutput):
+                raise RuntimeError(
+                    "NemotronH forward must return ModelForwardOutput."
+                )
+            if model_output.moe_input_hidden_states is None:
+                raise RuntimeError(
+                    "NemotronH forward must return MoE input hidden states."
+                )
+            if model_output.moe_output_hidden_states is None:
+                raise RuntimeError(
+                    "NemotronH forward must return MoE output hidden states."
+                )
+            if model_output.moe_router_outputs is None:
+                raise RuntimeError(
+                    "NemotronH forward must return MoE router outputs."
+                )
+
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
-            if self.use_aux_hidden_state_outputs:
-                # True when EAGLE 3 is used.
-                hidden_states, aux_hidden_states = model_output
-            else:
-                # Common case.
-                hidden_states = model_output
-                aux_hidden_states = None
+            hidden_states, aux_hidden_states = self._unpack_model_output(model_output)
+            moe_input_hidden_states = None
+            moe_output_hidden_states = None
+            moe_router_outputs = None
 
             if not self.broadcast_pp_output:
                 # Common case.
@@ -3326,12 +3473,26 @@ class GPUModelRunner(
                         kv_connector_output,
                     )
 
+                (
+                    moe_input_hidden_states,
+                    moe_output_hidden_states,
+                    moe_router_outputs,
+                ) = self._maybe_copy_moe_outputs_to_cpu(
+                    model_output, num_tokens_unpadded
+                )
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
             else:
                 # Rare case.
                 assert not self.is_pooling_model
 
+                (
+                    moe_input_hidden_states,
+                    moe_output_hidden_states,
+                    moe_router_outputs,
+                ) = self._maybe_copy_moe_outputs_to_cpu(
+                    model_output, num_tokens_unpadded
+                )
                 sample_hidden_states = hidden_states[logits_indices]
                 if not get_pp_group().is_last_rank:
                     all_gather_tensors = {
@@ -3366,6 +3527,9 @@ class GPUModelRunner(
             hidden_states,
             sample_hidden_states,
             aux_hidden_states,
+            moe_input_hidden_states,
+            moe_output_hidden_states,
+            moe_router_outputs,
             ec_connector_output,
             cudagraph_stats,
         )
@@ -3404,6 +3568,9 @@ class GPUModelRunner(
             hidden_states,
             sample_hidden_states,
             aux_hidden_states,
+            moe_input_hidden_states,
+            moe_output_hidden_states,
+            moe_router_outputs,
             ec_connector_output,
             cudagraph_stats,
         ) = self.execute_model_state
@@ -3517,6 +3684,9 @@ class GPUModelRunner(
                 sampled_token_ids=valid_sampled_token_ids,
                 logprobs=logprobs_lists,
                 prompt_logprobs_dict=prompt_logprobs_dict,
+                moe_input_hidden_states=moe_input_hidden_states,
+                moe_output_hidden_states=moe_output_hidden_states,
+                moe_router_outputs=moe_router_outputs,
                 kv_connector_output=kv_connector_output,
                 ec_connector_output=ec_connector_output
                 if self.supports_mm_inputs

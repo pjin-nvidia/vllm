@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.fused_moe.router_output import FusedMoERouterOutput
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -131,6 +132,9 @@ class EngineCoreOutput(
     new_prompt_logprobs_tensors: LogprobsTensors | None = None
 
     pooling_output: torch.Tensor | None = None
+    moe_input_hidden_states: list[torch.Tensor] | None = None
+    moe_output_hidden_states: list[torch.Tensor] | None = None
+    moe_router_outputs: list[FusedMoERouterOutput] | None = None
 
     finish_reason: FinishReason | None = None
     stop_reason: int | str | None = None

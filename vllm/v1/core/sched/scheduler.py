@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from typing import Any
 
 import numpy as np
+import torch
 
 from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -29,6 +30,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsReader,
 )
+from vllm.model_executor.layers.fused_moe.router_output import FusedMoERouterOutput
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
@@ -1105,6 +1107,9 @@ class Scheduler(SchedulerInterface):
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
+        moe_input_hidden_states = model_runner_output.moe_input_hidden_states
+        moe_output_hidden_states = model_runner_output.moe_output_hidden_states
+        moe_router_outputs = model_runner_output.moe_router_outputs
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
@@ -1112,6 +1117,50 @@ class Scheduler(SchedulerInterface):
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
             perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
+
+        moe_token_offsets = None
+        if (
+            moe_input_hidden_states is not None
+            or moe_output_hidden_states is not None
+            or moe_router_outputs is not None
+        ):
+            num_reqs = len(model_runner_output.req_id_to_index)
+            num_tokens_per_req = np.zeros(num_reqs, dtype=np.int32)
+            for req_id, num_tokens in num_scheduled_tokens.items():
+                req_index = model_runner_output.req_id_to_index.get(req_id)
+                if req_index is None:
+                    continue
+                num_tokens_per_req[req_index] = num_tokens
+            moe_token_offsets = np.zeros(num_reqs + 1, dtype=np.int32)
+            np.cumsum(num_tokens_per_req, out=moe_token_offsets[1:])
+
+        def _slice_moe_hidden_states(
+            states: list[torch.Tensor] | None,
+            start: int,
+            end: int,
+        ) -> list[torch.Tensor] | None:
+            if states is None:
+                return None
+            if not states:
+                return []
+            return [state[start:end] for state in states]
+
+        def _slice_moe_router_outputs(
+            outputs: list[FusedMoERouterOutput] | None,
+            start: int,
+            end: int,
+        ) -> list[FusedMoERouterOutput] | None:
+            if outputs is None:
+                return None
+            if not outputs:
+                return []
+            return [
+                FusedMoERouterOutput(
+                    topk_weights=output.topk_weights[start:end],
+                    topk_ids=output.topk_ids[start:end],
+                )
+                for output in outputs
+            ]
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
@@ -1150,6 +1199,21 @@ class Scheduler(SchedulerInterface):
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
+            moe_input_hidden_states_req = None
+            moe_output_hidden_states_req = None
+            moe_router_outputs_req = None
+            if moe_token_offsets is not None:
+                start = int(moe_token_offsets[req_index])
+                end = start + num_tokens_scheduled
+                moe_input_hidden_states_req = _slice_moe_hidden_states(
+                    moe_input_hidden_states, start, end
+                )
+                moe_output_hidden_states_req = _slice_moe_hidden_states(
+                    moe_output_hidden_states, start, end
+                )
+                moe_router_outputs_req = _slice_moe_router_outputs(
+                    moe_router_outputs, start, end
+                )
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
@@ -1276,6 +1340,9 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                         routed_experts=routed_experts,
+                        moe_input_hidden_states=moe_input_hidden_states_req,
+                        moe_output_hidden_states=moe_output_hidden_states_req,
+                        moe_router_outputs=moe_router_outputs_req,
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
                 )

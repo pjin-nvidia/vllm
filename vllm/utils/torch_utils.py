@@ -624,22 +624,69 @@ def weak_ref_tensors(
     tensors: torch.Tensor
     | list[torch.Tensor]
     | tuple[torch.Tensor]
-    | IntermediateTensors,
+    | IntermediateTensors
+    | "ModelForwardOutput",
 ) -> torch.Tensor | list[Any] | tuple[Any] | Any:
     """
     Convenience function to create weak references to tensors,
     for single tensor, list of tensors or tuple of tensors.
     """
+    from vllm.model_executor.layers.fused_moe.router_output import FusedMoERouterOutput
+    from vllm.model_executor.models.forward_output import ModelForwardOutput
+
     if isinstance(tensors, torch.Tensor):
         return weak_ref_tensor(tensors)
     if isinstance(tensors, list):
-        return [weak_ref_tensor(t) for t in tensors]
+        return [weak_ref_tensors(t) for t in tensors]
     if isinstance(tensors, tuple):
-        return tuple(weak_ref_tensor(t) for t in tensors)
+        return tuple(weak_ref_tensors(t) for t in tensors)
 
     # For IntermediateTensors used in pipeline parallelism
     from vllm.sequence import IntermediateTensors
 
+    if isinstance(tensors, ModelForwardOutput):
+        hidden_states = weak_ref_tensors(tensors.hidden_states)
+        aux_hidden_states = (
+            None
+            if tensors.aux_hidden_states is None
+            else [weak_ref_tensor(t) for t in tensors.aux_hidden_states]
+        )
+        moe_input_hidden_states = (
+            None
+            if tensors.moe_input_hidden_states is None
+            else [weak_ref_tensor(t) for t in tensors.moe_input_hidden_states]
+        )
+        moe_output_hidden_states = (
+            None
+            if tensors.moe_output_hidden_states is None
+            else [weak_ref_tensor(t) for t in tensors.moe_output_hidden_states]
+        )
+        moe_router_outputs = (
+            None
+            if tensors.moe_router_outputs is None
+            else [
+                FusedMoERouterOutput(
+                    topk_weights=weak_ref_tensor(output.topk_weights),
+                    topk_ids=weak_ref_tensor(output.topk_ids),
+                )
+                for output in tensors.moe_router_outputs
+            ]
+        )
+        if hasattr(tensors, "_replace"):
+            return tensors._replace(
+                hidden_states=hidden_states,
+                aux_hidden_states=aux_hidden_states,
+                moe_input_hidden_states=moe_input_hidden_states,
+                moe_output_hidden_states=moe_output_hidden_states,
+                moe_router_outputs=moe_router_outputs,
+            )
+        return tensors.__class__(
+            hidden_states=hidden_states,
+            aux_hidden_states=aux_hidden_states,
+            moe_input_hidden_states=moe_input_hidden_states,
+            moe_output_hidden_states=moe_output_hidden_states,
+            moe_router_outputs=moe_router_outputs,
+        )
     if isinstance(tensors, IntermediateTensors):
         ret = IntermediateTensors(
             {key: weak_ref_tensor(val) for key, val in tensors.tensors.items()}

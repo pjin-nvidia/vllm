@@ -23,6 +23,10 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
+from vllm.model_executor.layers.fused_moe.router_output import (
+    FusedMoEForwardOutput,
+    FusedMoERouterOutput,
+)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
     FusedMoEPermuteExpertsUnpermute,
@@ -292,7 +296,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor] | FusedMoEForwardOutput:
         return self.forward(
             router=router,
             layer=layer,
@@ -315,7 +319,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor] | FusedMoEForwardOutput:
         topk_weights, topk_ids = router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -334,7 +338,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             expert_map=layer.expert_map,
         )
 
-        return result
+        return FusedMoEForwardOutput(
+            output=result,
+            router_output=FusedMoERouterOutput(
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+            ),
+        )
 
     def forward_cpu(
         self,

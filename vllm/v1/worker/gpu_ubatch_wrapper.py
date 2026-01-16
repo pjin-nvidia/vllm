@@ -20,12 +20,161 @@ from vllm.forward_context import (
     override_forward_context,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.router_output import FusedMoERouterOutput
+from vllm.model_executor.models.forward_output import ModelForwardOutput
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 
 logger = init_logger(__name__)
+
+
+def _concat_hidden_states(
+    outputs: list[torch.Tensor | IntermediateTensors],
+) -> torch.Tensor | IntermediateTensors:
+    first = outputs[0]
+    if isinstance(first, IntermediateTensors):
+        tensors = {
+            key: torch.cat([output.tensors[key] for output in outputs], dim=0)
+            for key in first.tensors
+        }
+        return IntermediateTensors(tensors)
+    return torch.cat(outputs, dim=0)
+
+
+def _concat_aux_hidden_states(
+    outputs: list[list[torch.Tensor] | None],
+) -> list[torch.Tensor] | None:
+    if not outputs or outputs[0] is None:
+        return None
+    num_layers = len(outputs[0])
+    for aux in outputs:
+        if aux is None or len(aux) != num_layers:
+            raise ValueError("Mismatched aux hidden states for ubatching.")
+    return [torch.cat([aux[i] for aux in outputs], dim=0) for i in range(num_layers)]
+
+
+def _concat_moe_hidden_states(
+    outputs: list[list[torch.Tensor] | None],
+) -> list[torch.Tensor] | None:
+    if not outputs:
+        return None
+    first = outputs[0]
+    if first is None:
+        return None
+    num_layers = len(first)
+    for moe_states in outputs:
+        if moe_states is None or len(moe_states) != num_layers:
+            raise ValueError("Mismatched MoE hidden states for ubatching.")
+    if num_layers == 0:
+        return []
+    return [
+        torch.cat([moe_states[i] for moe_states in outputs], dim=0)
+        for i in range(num_layers)
+    ]
+
+
+def _concat_moe_router_outputs(
+    outputs: list[list[FusedMoERouterOutput] | None],
+) -> list[FusedMoERouterOutput] | None:
+    if not outputs:
+        return None
+    first = outputs[0]
+    if first is None:
+        return None
+    num_layers = len(first)
+    for router_outputs in outputs:
+        if router_outputs is None or len(router_outputs) != num_layers:
+            raise ValueError("Mismatched MoE router outputs for ubatching.")
+    if num_layers == 0:
+        return []
+    return [
+        FusedMoERouterOutput(
+            topk_weights=torch.cat(
+                [router_outputs[i].topk_weights for router_outputs in outputs],
+                dim=0,
+            ),
+            topk_ids=torch.cat(
+                [router_outputs[i].topk_ids for router_outputs in outputs],
+                dim=0,
+            ),
+        )
+        for i in range(num_layers)
+    ]
+
+
+def _concat_model_outputs(outputs: list[Any]) -> Any:
+    first = outputs[0]
+    if isinstance(first, ModelForwardOutput):
+        hidden_states = _concat_hidden_states(
+            [output.hidden_states for output in outputs]
+        )
+        aux_hidden_states = _concat_aux_hidden_states(
+            [output.aux_hidden_states for output in outputs]
+        )
+        moe_input_hidden_states = _concat_moe_hidden_states(
+            [output.moe_input_hidden_states for output in outputs]
+        )
+        moe_output_hidden_states = _concat_moe_hidden_states(
+            [output.moe_output_hidden_states for output in outputs]
+        )
+        moe_router_outputs = _concat_moe_router_outputs(
+            [output.moe_router_outputs for output in outputs]
+        )
+        output_cls = first.__class__
+        try:
+            return output_cls(
+                hidden_states=hidden_states,
+                aux_hidden_states=aux_hidden_states,
+                moe_input_hidden_states=moe_input_hidden_states,
+                moe_output_hidden_states=moe_output_hidden_states,
+                moe_router_outputs=moe_router_outputs,
+            )
+        except TypeError as exc:
+            raise TypeError(
+                "Custom model output must accept hidden_states and "
+                "aux_hidden_states to support ubatching."
+            ) from exc
+    if hasattr(first, "hidden_states"):
+        hidden_states = _concat_hidden_states(
+            [output.hidden_states for output in outputs]
+        )
+        aux_hidden_states = _concat_aux_hidden_states(
+            [getattr(output, "aux_hidden_states", None) for output in outputs]
+        )
+        moe_input_hidden_states = _concat_moe_hidden_states(
+            [getattr(output, "moe_input_hidden_states", None) for output in outputs]
+        )
+        moe_output_hidden_states = _concat_moe_hidden_states(
+            [getattr(output, "moe_output_hidden_states", None) for output in outputs]
+        )
+        moe_router_outputs = _concat_moe_router_outputs(
+            [getattr(output, "moe_router_outputs", None) for output in outputs]
+        )
+        try:
+            return first.__class__(
+                hidden_states=hidden_states,
+                aux_hidden_states=aux_hidden_states,
+                moe_input_hidden_states=moe_input_hidden_states,
+                moe_output_hidden_states=moe_output_hidden_states,
+                moe_router_outputs=moe_router_outputs,
+            )
+        except TypeError:
+            return ModelForwardOutput(
+                hidden_states=hidden_states,
+                aux_hidden_states=aux_hidden_states,
+                moe_input_hidden_states=moe_input_hidden_states,
+                moe_output_hidden_states=moe_output_hidden_states,
+                moe_router_outputs=moe_router_outputs,
+            )
+    if isinstance(first, tuple) and len(first) == 2:
+        hidden_states = _concat_hidden_states([output[0] for output in outputs])
+        aux_hidden_states = _concat_aux_hidden_states([output[1] for output in outputs])
+        return hidden_states, aux_hidden_states
+    if isinstance(first, IntermediateTensors):
+        return _concat_hidden_states(outputs)
+    return torch.cat(outputs, dim=0)
 
 
 @dataclass
@@ -169,7 +318,7 @@ class UBatchWrapper:
         # in case we need to access the original runnable.
         return self.runnable
 
-    def _capture_ubatches(self, ubatch_metadata, model) -> torch.Tensor:
+    def _capture_ubatches(self, ubatch_metadata, model) -> Any:
         """
         Capture a cudagraph for a microbatched run.
 
@@ -210,7 +359,7 @@ class UBatchWrapper:
 
             results.append((ubatch_metadata.context.id, model_output))
 
-        results: list[tuple[int, torch.Tensor]] = []
+        results: list[tuple[int, Any]] = []
         compute_stream = ubatch_metadata[0].context.compute_stream
         num_tokens = ubatch_metadata[0].num_tokens + ubatch_metadata[1].num_tokens
 
@@ -248,12 +397,12 @@ class UBatchWrapper:
                 for thread in ubatch_threads:
                     thread.join()
                 sorted_results = [value for position, value in sorted(results)]
-                result = torch.cat(sorted_results, dim=0)
+                result = _concat_model_outputs(sorted_results)
                 cudagraph_metadata.outputs = result
             self.cudagraphs[num_tokens] = cudagraph_metadata
         return cudagraph_metadata.outputs
 
-    def _run_ubatches(self, ubatch_metadata, model) -> torch.Tensor:
+    def _run_ubatches(self, ubatch_metadata, model) -> Any:
         @torch.inference_mode()
         def _ubatch_thread(results, model, ubatch_metadata):
             with ubatch_metadata.context:
@@ -265,7 +414,7 @@ class UBatchWrapper:
                 )
             results.append((ubatch_metadata.context.id, model_output))
 
-        results: list[tuple[int, torch.Tensor]] = []
+        results: list[tuple[int, Any]] = []
 
         # Ubatch threads will manually manage the forward context, so we
         # override it to None here so we can have it restored correctly
@@ -288,8 +437,7 @@ class UBatchWrapper:
             for thread in ubatch_threads:
                 thread.join()
         sorted_results = [value for position, value in sorted(results)]
-        result = torch.cat(sorted_results, dim=0)
-        return result
+        return _concat_model_outputs(sorted_results)
 
     def _make_ubatch_metadata(
         self,
