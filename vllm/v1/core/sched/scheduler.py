@@ -237,7 +237,7 @@ class Scheduler(SchedulerInterface):
                 "(dcp_world_size > 1 or pcp_world_size > 1)"
             )
 
-            self.routed_experts_reader = RoutedExpertsReader.create()
+            # self.routed_experts_reader = RoutedExpertsReader.create()
 
             assert len(kv_cache_config.kv_cache_groups) > 0, (
                 "enable_return_routed_experts requires at least one kv cache group"
@@ -256,6 +256,7 @@ class Scheduler(SchedulerInterface):
             self.max_num_kv_tokens = (num_gpu_blocks + 1) * block_size
             logger.info(f"Scheduler: max tokens = {self.max_num_kv_tokens}")
 
+        if False:
             self.routed_experts_reader.attach_buffer(
                 max_num_kv_tokens=self.max_num_kv_tokens,
                 model_config=self.vllm_config.model_config,

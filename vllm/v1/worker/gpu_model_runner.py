@@ -3252,7 +3252,8 @@ class GPUModelRunner(
                 "after execute_model() returns None."
             )
 
-        if self.vllm_config.model_config.enable_return_routed_experts:
+        if False:
+        # if self.vllm_config.model_config.enable_return_routed_experts:
             capturer = RoutedExpertsCapturer.get_instance()
             if capturer is not None:
                 capturer.clear_buffer()  # noqa
@@ -3669,7 +3670,8 @@ class GPUModelRunner(
             self.eplb_step()
 
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
-            if self.model_config.enable_return_routed_experts:
+            if False:
+            # if self.model_config.enable_return_routed_experts:
                 cap_data = None
                 capturer = RoutedExpertsCapturer.get_instance()
                 if False:
@@ -5853,7 +5855,8 @@ class GPUModelRunner(
                 kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
-        if self.model_config.enable_return_routed_experts:
+        if False:
+        # if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
 
     def init_routed_experts_capturer(self):
