@@ -392,6 +392,8 @@ class RayDistributedExecutor(Executor):
         scheduler_output: SchedulerOutput,
         non_block: bool = False,
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        logger.info(f"RayDistributedExecutor.execute_model: non block = {non_block}")
+
         if self.scheduler_output is not None:
             raise RuntimeError(
                 "State error: sample_tokens() must be called "
@@ -400,10 +402,14 @@ class RayDistributedExecutor(Executor):
 
         if not self.uses_sampler or not scheduler_output.total_num_scheduled_tokens:
             # Model will not execute, call model runner immediately.
-            return self._execute_dag(scheduler_output, None, non_block)
+            logger.info(f"RayDistributedExecutor.execute_model: execute dag... non block = {non_block}")
+            result = self._execute_dag(scheduler_output, None, non_block)
+            logger.info(f"RayDistributedExecutor.execute_model: execute dag: done")
+            return result
 
         # Model will execute, defer to sample_tokens() call.
         self.scheduler_output = scheduler_output
+        logger.info(f"RayDistributedExecutor.execute_model: return none")
         return COMPLETED_NONE_FUTURE if non_block else None
 
     def sample_tokens(  # type: ignore[override]
@@ -423,13 +429,18 @@ class RayDistributedExecutor(Executor):
         Returns:
             The model runner output.
         """
+        logger.info(f"RayDistributedExecutor.sample_tokens: non block = {non_block}")
         scheduler_output = self.scheduler_output
         if scheduler_output is None:
+            logger.info(f"RayDistributedExecutor.sample_tokens: return none")
             return COMPLETED_NONE_FUTURE if non_block else None
 
         self.scheduler_output = None
 
-        return self._execute_dag(scheduler_output, grammar_output, non_block)
+        logger.info(f"RayDistributedExecutor.sample_tokens: execute dag... non block = {non_block}")
+        result = self._execute_dag(scheduler_output, grammar_output, non_block)
+        logger.info(f"RayDistributedExecutor.sample_tokens: execute dag: done")
+        return result
 
     def _execute_dag(
         self,
@@ -441,25 +452,32 @@ class RayDistributedExecutor(Executor):
         if self.forward_dag is None:  # type: ignore
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
+        logger.info(f"RayDistributedExecutor._execute_dag: forward dag execute...")
         refs = self.forward_dag.execute((scheduler_output, grammar_output))  # type: ignore
 
         if not self.has_connector:
             # Get output only from a single worker (output_rank)
             # When PP is not used, we block here until the result is available.
             if not non_block:
-                return refs[0].get()
+                result = refs[0].get()
+                logger.info(f"RayDistributedExecutor._execute_dag: forward dag execute: done 1 non block = {non_block}")
+                return result
 
             # When PP is used, we return a FutureWrapper immediately so that
             # the scheduler can yield to the next batch.
+            logger.info(f"RayDistributedExecutor._execute_dag: forward dag execute: done 2 non block = {non_block}")
             return FutureWrapper(refs[0])
 
         # Get output from all workers when connector is present
         assert self.kv_output_aggregator is not None
         if not non_block:
             # Block and get results from all workers
-            return self.kv_output_aggregator.aggregate(ray.get(refs))
+            result = ray.get(refs)
+            logger.info(f"RayDistributedExecutor._execute_dag: forward dag execute: done 3")
+            return self.kv_output_aggregator.aggregate(result)
 
         # Return a future that will aggregate outputs from all workers
+        logger.info(f"RayDistributedExecutor._execute_dag: forward dag execute: done 4")
         return FutureWrapper(refs, self.kv_output_aggregator)
 
     def collective_rpc(  # type: ignore[override]
@@ -562,6 +580,7 @@ class RayDistributedExecutor(Executor):
 
             # All workers in the first TP group will take in the
             # ExecuteModelRequest as input.
+            logger.info(f"RayDistributedExecutor._compiled_ray_dag: execute model ray...")
             outputs = [input_data for _ in self.pp_tp_workers[0]]
             for pp_rank, tp_group in enumerate(self.pp_tp_workers):
                 # Each PP worker takes in the output of the previous PP worker,
@@ -586,6 +605,7 @@ class RayDistributedExecutor(Executor):
                     ]
 
             forward_dag = MultiOutputNode(outputs)
+            logger.info(f"RayDistributedExecutor._compiled_ray_dag: execute model ray: done")
 
         if envs.VLLM_USE_RAY_WRAPPED_PP_COMM:
             from ray.experimental.channel.accelerator_context import (

@@ -114,7 +114,9 @@ try:
                 assert not output or not output.req_ids
                 output = scheduler_output, grammar_output, None
             elif output is None:
+                logger.info(f"RayWorkerWrapper.execute_model_ray: sample tokens...")
                 output = self.worker.model_runner.sample_tokens(grammar_output)
+                logger.info(f"RayWorkerWrapper.execute_model_ray: sample tokens: done")
                 # Ensure outputs crossing Ray compiled DAG are serializable.
                 # AsyncModelRunnerOutput holds CUDA events and cannot be
                 # pickled.

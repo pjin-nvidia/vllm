@@ -1199,6 +1199,8 @@ class Scheduler(SchedulerInterface):
 
             routed_experts = None
             if stopped:
+                # FIXME(pjin): debugging.
+                # if False:
                 if self.vllm_config.model_config.enable_return_routed_experts:
                     kv_blocks = self.kv_cache_manager.get_blocks(req_id)
                     # logger.info(f"Scheduler.update_from_output: kv blocks  = {kv_blocks}")
@@ -1223,6 +1225,7 @@ class Scheduler(SchedulerInterface):
                         slot_mapping.append(block_ids[0] * kv_block_size + pos)
                     slot_mapping = np.array(slot_mapping, dtype=np.int64)
 
+                # if False:
                     routed_experts = self.routed_experts_reader.get_routed_experts(
                         indices=slot_mapping
                     )

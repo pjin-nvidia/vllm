@@ -1583,6 +1583,9 @@ class GPUModelRunner(
         num_reqs_padded = num_reqs_padded or num_reqs
         assert num_reqs_padded is not None and num_tokens_padded is not None
 
+        # logger.debug(f"GPUModelRunner._build_attention_metadata: num tokens = {num_tokens} num tokens padded = {num_tokens_padded}")
+        # logger.debug(f"GPUModelRunner._build_attention_metadata: num reqs = {num_reqs} num reqs padded = {num_reqs_padded}")
+
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
@@ -1632,7 +1635,12 @@ class GPUModelRunner(
 
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
         if self.model_config.enable_return_routed_experts:
-            self.slot_mapping = slot_mapping_gid_0[:num_tokens].cpu().numpy()
+            slot_mapping = slot_mapping_gid_0[:num_tokens].cpu().numpy()
+            if False and not hasattr(self, "slot_mapping_offset"):
+                self.slot_mapping_offset = self._compute_slot_mapping_offset()
+            if False:
+                slot_mapping = slot_mapping - self.slot_mapping_offset
+            self.slot_mapping = slot_mapping
         cm_base = CommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
@@ -3368,6 +3376,8 @@ class GPUModelRunner(
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+        logger.info("GPUModelRunner.sample_tokens: ...")
+
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
 
@@ -3495,9 +3505,11 @@ class GPUModelRunner(
             if self.model_config.enable_return_routed_experts:
                 capturer = RoutedExpertsCapturer.get_instance()
                 if capturer is not None:
+                    # logger.debug(f"GPUModelRunner.sample_tokens: save captured experts: indices = {self.slot_mapping}")
                     capturer.save_captured_experts(indices=self.slot_mapping)  # noqa
                 else:
                     logger.error("RoutedExpertsCapturer not initialized.")
+                logger.info("GPUModelRunner.sample_tokens: save captured experts")
 
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
@@ -3512,8 +3524,10 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
             )
+            logger.info("GPUModelRunner.sample_tokens: output")
 
         if not self.use_async_scheduling:
+            logger.info("GPUModelRunner.sample_tokens: return output")
             return output
 
         with record_function_or_nullcontext(
@@ -3537,6 +3551,7 @@ class GPUModelRunner(
                 async_output.async_copy_ready_event,
             )
 
+        logger.info("GPUModelRunner.sample_tokens: return async output")
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:

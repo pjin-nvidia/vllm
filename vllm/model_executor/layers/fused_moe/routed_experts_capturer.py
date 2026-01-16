@@ -198,6 +198,8 @@ class RoutedExpertsCapturer:
             model_config: Model configuration containing layer and expert info.
             instance_id: Unique identifier for the shared memory buffer.
         """
+        # logger.debug(f"RoutedExpertsCapturer.init_buffer: max num batched tokens = {max_num_batched_tokens}")
+        # logger.debug(f"RoutedExpertsCapturer.init_buffer: max num kv tokens      = {max_num_kv_tokens}")
 
         if self._device_buffer is not None:
             raise RuntimeError("Device buffer has already been initialized")
@@ -208,6 +210,8 @@ class RoutedExpertsCapturer:
         self._buffer_dtype_torch, self._buffer_dtype_np = (
             self._select_buffer_dtype(model_config)
         )
+        # logger.debug(f"RoutedExpertsCapturer.init_buffer: num layers             = {num_layers}")
+        # logger.debug(f"RoutedExpertsCapturer.init_buffer: num topk experts       = {num_experts_per_tok}")
 
         # Initialize device buffer
         self._device_buffer = torch.zeros(
@@ -307,8 +311,10 @@ class RoutedExpertsCapturer:
         if num_tokens == 0:
             return
 
-        if not self._pinned_buffers or self._copy_stream is None:
+        if True:
+        # if not self._pinned_buffers or self._copy_stream is None:
             data = self._device_buffer[:num_tokens, :, :].cpu().numpy()
+            logger.info(f"RoutedExpertsCapturer.save_captured_experts: unpin: indices = {indices} data shape = {data.shape}")
             self._write_to_host(indices, data)
             return
 
@@ -323,6 +329,7 @@ class RoutedExpertsCapturer:
             evt.record(self._copy_stream)
         evt.synchronize()
         data = buf[:num_tokens].numpy()
+        logger.info(f"RoutedExpertsCapturer.save_captured_experts: pin: indices = {indices} data shape = {data.shape}")
         self._write_to_host(indices, data)
 
     def _write_to_host(self, indices: np.ndarray, data: np.ndarray) -> None:
@@ -383,7 +390,7 @@ class RoutedExpertsCapturer:
                 (max_num_batched_tokens, num_layers, num_experts),
                 dtype=self._buffer_dtype_torch,
                 device="cpu",
-                pin_memory=True,
+                # pin_memory=True,
             )
             for _ in range(2)
         ]
@@ -584,6 +591,7 @@ class RoutedExpertsReader:
         max_index = int(indices.max())
         if max_index >= self._host_buffer_view.shape[0]:
             if self._mmap_path is not None and not self._use_shm:
+                raise NotImplementedError
                 self._ensure_mmap_capacity(max_index + 1)
             else:
                 raise RuntimeError(

@@ -1667,6 +1667,8 @@ class FusedMoE(CustomOp):
             # In dummy runs, the capturer is not initialized.
             capturer = RoutedExpertsCapturer.get_instance()
             if capturer is not None:  # in dummmy_run may be None
+                # logger.debug(f"FusedMoE._select_experts: layer id = {self.layer_id} hidden states shape = {hidden_states.shape} router logits shape = {router_logits.shape}")
+                # logger.debug(f"FusedMoE._select_experts: layer id = {self.layer_id} topk ids = {topk_ids.tolist()} hidden states shape = {hidden_states.shape} router logits shape = {router_logits.shape}")
                 capturer.capture(  # noqa
                     layer_id=self.layer_id,
                     topk_ids=topk_ids,
