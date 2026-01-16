@@ -239,10 +239,19 @@ class Scheduler(SchedulerInterface):
             assert len(kv_cache_config.kv_cache_groups) > 0, (
                 "enable_return_routed_experts requires at least one kv cache group"
             )
+            # TODO(pjin): what is the correct num block/block size to use?
             num_gpu_blocks = self.cache_config.num_gpu_blocks
+            block_size = self.block_size
+            logger.info(f"Scheduler: num blocks = {num_gpu_blocks} (initial)")
+            logger.info(f"Scheduler: block size = {block_size} (initial)")
             if num_gpu_blocks is None:
                 num_gpu_blocks = kv_cache_config.num_blocks
-            self.max_num_kv_tokens = (num_gpu_blocks + 1) * self.block_size
+                kv_cache_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+                block_size = kv_cache_spec.block_size
+            logger.info(f"Scheduler: num blocks = {num_gpu_blocks} (final)")
+            logger.info(f"Scheduler: block size = {block_size} (final)")
+            self.max_num_kv_tokens = (num_gpu_blocks + 1) * block_size
+            logger.info(f"Scheduler: max tokens = {self.max_num_kv_tokens}")
 
             self.routed_experts_reader.attach_buffer(
                 max_num_kv_tokens=self.max_num_kv_tokens,
@@ -1191,7 +1200,7 @@ class Scheduler(SchedulerInterface):
             routed_experts = None
             if stopped:
                 if self.vllm_config.model_config.enable_return_routed_experts:
-                    kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)
+                    kv_blocks = self.kv_cache_manager.get_blocks(req_id)
                     # logger.info(f"Scheduler.update_from_output: kv blocks  = {kv_blocks}")
                     # block_ids = kv_blocks.get_block_ids()
                     # logger.info(f"Scheduler.update_from_output: block ids  = {block_ids}")
