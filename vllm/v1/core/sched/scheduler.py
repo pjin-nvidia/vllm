@@ -1192,22 +1192,27 @@ class Scheduler(SchedulerInterface):
             if stopped:
                 if self.vllm_config.model_config.enable_return_routed_experts:
                     kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)
+                    # logger.info(f"Scheduler.update_from_output: kv blocks  = {kv_blocks}")
+                    # block_ids = kv_blocks.get_block_ids()
+                    # logger.info(f"Scheduler.update_from_output: block ids  = {block_ids}")
+                    # block_ids = block_ids[0]
                     block_ids = kv_blocks.get_block_ids()[0]
                     num_tokens = request.num_tokens - 1
+                    logger.info(f"Scheduler.update_from_output: block ids  = {block_ids}")
+                    # logger.info(f"Scheduler.update_from_output: num blocks = {len(block_ids)}")
+                    kv_cache_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
+                    kv_block_size = kv_cache_spec.block_size
+                    # logger.info(f"Scheduler.update_from_output: block size = {self.block_size}")
+                    logger.info(f"Scheduler.update_from_output: block size = {kv_block_size}")
+                    logger.info(f"Scheduler.update_from_output: num tokens = {num_tokens}")
+                    # logger.info(f"Scheduler.update_from_output: request    = {request}")
 
-                    # compute slot mapping
-                    block_ids_array = np.array(block_ids, dtype=np.int32)
-                    num_blocks = len(block_ids)
-                    block_size = self.block_size
-
-                    # generate block offsets
-                    block_offsets = np.arange(0, block_size)
-
-                    # compute slot mapping: slot = block_id * block_size + offset
-                    slot_mapping = (
-                        block_offsets.reshape((1, block_size))
-                        + block_ids_array.reshape((num_blocks, 1)) * block_size
-                    ).flatten()[:num_tokens]
+                    # FIXME(pjin): assuming the request data fits in a single KV cache block.
+                    assert len(block_ids) == 1
+                    slot_mapping = []
+                    for pos in range(num_tokens):
+                        slot_mapping.append(block_ids[0] * kv_block_size + pos)
+                    slot_mapping = np.array(slot_mapping, dtype=np.int64)
 
                     routed_experts = self.routed_experts_reader.get_routed_experts(
                         indices=slot_mapping
