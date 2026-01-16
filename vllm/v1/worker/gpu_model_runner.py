@@ -241,6 +241,8 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                 valid_sampled_token_ids[i].clear()
             logprobs_lists = None
             if self._logprobs_tensors_cpu is not None:
+                # Convert GPU-produced logprobs tensors into CPU lists for
+                # scheduler IPC (EngineCoreOutput uses LogprobsLists).
                 logprobs_lists = self._logprobs_tensors_cpu.tolists()
         else:
             valid_sampled_token_ids, logprobs_lists = RejectionSampler.parse_output(
@@ -2799,6 +2801,8 @@ class GPUModelRunner(
                     valid_sampled_token_ids[int(i)].clear()
 
                 if logprobs_tensors is not None:
+                    # Logprobs are produced on-device by the sampler and
+                    # converted to lists for ModelRunnerOutput serialization.
                     logprobs_lists = logprobs_tensors.tolists()
             else:
                 # Includes spec decode tokens.

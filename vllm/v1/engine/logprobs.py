@@ -239,7 +239,10 @@ class LogprobsProcessor:
         return decoded_tokens_list
 
     def update_from_output(self, output: EngineCoreOutput) -> None:
+        # EngineCoreOutput carries per-request logprob slices from the scheduler.
         if output.new_logprobs is not None:
             self._update_sample_logprobs(output.new_logprobs)
         if output.new_prompt_logprobs_tensors is not None:
+            # Prompt logprobs arrive as tensors from prefill and are
+            # accumulated into the request's prompt_logprobs list.
             self._update_prompt_logprobs(output.new_prompt_logprobs_tensors)

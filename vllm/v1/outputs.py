@@ -164,12 +164,16 @@ class ModelRunnerOutput:
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs]
+    # Produced in the model runner (CPU lists) and sliced per-request in
+    # the scheduler into EngineCoreOutput.new_logprobs.
     logprobs: LogprobsLists | None = None
 
     # req_id -> (token_ids, logprobs, ranks)
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len]
+    # Prompt logprobs stay as tensors until they are attached to
+    # EngineCoreOutput.new_prompt_logprobs_tensors and processed in the engine.
     prompt_logprobs_dict: dict[str, LogprobsTensors | None] = field(
         default_factory=dict
     )
