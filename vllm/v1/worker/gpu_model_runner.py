@@ -58,6 +58,7 @@ from vllm.model_executor.layers.rotary_embedding import (
     XDRotaryEmbedding,
 )
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
+from vllm.model_executor.model_outputs import ModelForwardOutput
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMRoPE,
@@ -2901,7 +2902,7 @@ class GPUModelRunner(
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **model_kwargs: dict[str, Any],
-    ) -> Any:
+    ) -> ModelForwardOutput:
         """Helper method to call the model forward pass.
 
         This method can be overridden by subclasses for model execution.
@@ -2916,14 +2917,29 @@ class GPUModelRunner(
             **model_kwargs: Additional model arguments
 
         Returns:
-            Model output tensor
+            ModelForwardOutput with hidden_states and optional aux_hidden_states.
         """
-        return self.model(
+        output = self.model(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
             **model_kwargs,
+        )
+        if isinstance(output, ModelForwardOutput):
+            return output
+        if isinstance(output, tuple):
+            if len(output) != 2:
+                raise ValueError(
+                    "Expected model forward to return 2-tuple for aux "
+                    f"hidden states, got {len(output)} items."
+                )
+            hidden_states, aux_hidden_states = output
+        else:
+            hidden_states = output
+            aux_hidden_states = None
+        return ModelForwardOutput(
+            hidden_states=hidden_states, aux_hidden_states=aux_hidden_states
         )
 
     @staticmethod
@@ -3296,12 +3312,15 @@ class GPUModelRunner(
             )
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
+            hidden_states = model_output.hidden_states
             if self.use_aux_hidden_state_outputs:
                 # True when EAGLE 3 is used.
-                hidden_states, aux_hidden_states = model_output
+                # Aux hidden states originate from model forward and are used
+                # later to build Eagle draft inputs.
+                aux_hidden_states = model_output.aux_hidden_states
+                assert aux_hidden_states is not None
             else:
                 # Common case.
-                hidden_states = model_output
                 aux_hidden_states = None
 
             if not self.broadcast_pp_output:
@@ -3722,6 +3741,8 @@ class GPUModelRunner(
                 target_positions = self._get_positions(num_scheduled_tokens)
                 if self.use_aux_hidden_state_outputs:
                     assert aux_hidden_states is not None
+                    # Eagle spec decode concatenates aux hidden states to form
+                    # the target hidden states used by the drafter.
                     target_hidden_states = torch.cat(
                         [h[:num_scheduled_tokens] for h in aux_hidden_states], dim=-1
                     )
@@ -3739,6 +3760,7 @@ class GPUModelRunner(
                     target_positions = self._get_positions(token_indices)
                     if self.use_aux_hidden_state_outputs:
                         assert aux_hidden_states is not None
+                        # Use per-token aux hidden states for Eagle draft inputs.
                         target_hidden_states = torch.cat(
                             [h[token_indices] for h in aux_hidden_states], dim=-1
                         )
@@ -3760,6 +3782,8 @@ class GPUModelRunner(
                     target_positions = self._get_positions(total_num_tokens)
                     if self.use_aux_hidden_state_outputs:
                         assert aux_hidden_states is not None
+                        # Padded path: concatenate aux hidden states over
+                        # the padded batch for Eagle.
                         target_hidden_states = torch.cat(
                             [h[:total_num_tokens] for h in aux_hidden_states], dim=-1
                         )
