@@ -1390,6 +1390,8 @@ class OpenAIServingChat(OpenAIServing):
         assert final_res.prompt_token_ids is not None
         num_prompt_tokens = len(final_res.prompt_token_ids)
         prompt_routed_experts = None
+        # prompt_moe_topk_indices = None
+        logger.info(f"chat_completion_full_generator: prompt moe topk is None? {final_res.prompt_moe_topk_indices is None}")
 
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":
@@ -1408,6 +1410,9 @@ class OpenAIServingChat(OpenAIServing):
 
             if output.routed_experts is not None:
                 prompt_routed_experts = output.routed_experts[:num_prompt_tokens].tolist()
+            # if output.prompt_moe_topk_indices is not None:
+            #     prompt_moe_topk_indices = output.prompt_moe_topk_indices.tolist()
+            logger.info(f"chat_completion_full_generator: output moe topk is None? {output.moe_topk_indices is None}")
 
             if request.logprobs and request.top_logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
@@ -1472,6 +1477,9 @@ class OpenAIServingChat(OpenAIServing):
                     routed_experts=(
                         # output.routed_experts.tolist() if output.routed_experts is not None else None
                         output.routed_experts[num_prompt_tokens:].tolist() if output.routed_experts is not None else None
+                    ),
+                    moe_topk_indices=(
+                        output.moe_topk_indices.tolist() if output.moe_topk_indices is not None else None
                     ),
                 )
                 choices.append(choice_data)
@@ -1640,6 +1648,9 @@ class OpenAIServingChat(OpenAIServing):
                     # output.routed_experts.tolist() if output.routed_experts is not None else None
                     output.routed_experts[num_prompt_tokens:].tolist() if output.routed_experts is not None else None
                 ),
+                moe_topk_indices=(
+                    output.moe_topk_indices.tolist() if output.moe_topk_indices is not None else None
+                ),
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 
@@ -1688,6 +1699,7 @@ class OpenAIServingChat(OpenAIServing):
                 final_res.prompt_token_ids if request.return_token_ids or prompt_routed_experts is not None else None
             ),
             prompt_routed_experts=prompt_routed_experts,
+            prompt_moe_topk_indices=final_res.prompt_moe_topk_indices,
             kv_transfer_params=final_res.kv_transfer_params,
         )
 
