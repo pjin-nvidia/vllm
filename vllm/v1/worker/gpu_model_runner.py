@@ -2725,7 +2725,7 @@ class GPUModelRunner(
         logits: torch.Tensor | None,
         spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> SamplerOutput:
-        # Sample the next token and get logprobs if needed.
+        # Sample the next token and compute logprobs tensors if requested.
         sampling_metadata = self.input_batch.sampling_metadata
         # Update output token ids with tokens sampled in last step
         # if async scheduling and required by current sampling params.
@@ -2789,6 +2789,8 @@ class GPUModelRunner(
         num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
         sampled_token_ids = sampler_output.sampled_token_ids
         logprobs_tensors = sampler_output.logprobs_tensors
+        # logprobs_tensors (if present) contain top-k ids/logprobs per token
+        # derived from the model logits in the sampler.
         invalid_req_indices = []
         logprobs_lists = None
         if not self.use_async_scheduling:
@@ -3312,6 +3314,8 @@ class GPUModelRunner(
             )
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
+            # ModelForwardOutput carries the last hidden states from the model
+            # forward pass, which are later sliced into logits inputs.
             hidden_states = model_output.hidden_states
             if self.use_aux_hidden_state_outputs:
                 # True when EAGLE 3 is used.
@@ -3341,6 +3345,7 @@ class GPUModelRunner(
                         kv_connector_output,
                     )
 
+                # Gather token positions to score and project to logits.
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
             else:
@@ -3430,6 +3435,8 @@ class GPUModelRunner(
             )
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
+            # Sampler turns logits into sampled token ids and optional
+            # logprobs tensors for downstream serialization.
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         self._draft_token_ids = None
