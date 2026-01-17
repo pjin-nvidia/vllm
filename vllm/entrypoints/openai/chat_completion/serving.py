@@ -1699,7 +1699,11 @@ class OpenAIServingChat(OpenAIServing):
                 final_res.prompt_token_ids if request.return_token_ids or prompt_routed_experts is not None else None
             ),
             prompt_routed_experts=prompt_routed_experts,
-            prompt_moe_topk_indices=final_res.prompt_moe_topk_indices,
+            prompt_moe_topk_indices=(
+                final_res.prompt_moe_topk_indices.tolist()
+                if final_res.prompt_moe_topk_indices is not None
+                else None
+            ),
             kv_transfer_params=final_res.kv_transfer_params,
         )
 
