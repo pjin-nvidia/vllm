@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Literal, cast, get_args, overload
 
 import torch
+import torch._dynamo
 import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
 
@@ -22,7 +23,11 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.distributed.eplb.eplb_state import EplbState
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import (
+    ForwardContext,
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
@@ -1662,6 +1667,10 @@ class FusedMoE(CustomOp):
             topk_ids = topk_ids.to(dtype=indices_type)
 
         assert topk_ids.dtype == indices_type or indices_type is None
+
+        if is_forward_context_available() and not torch._dynamo.is_compiling():
+            # Stash the router top-k indices for this layer in the forward context.
+            get_forward_context().moe_topk_indices.append(topk_ids)
 
         if (
             self.vllm_config.model_config is not None
