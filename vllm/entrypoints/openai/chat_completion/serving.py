@@ -1391,7 +1391,7 @@ class OpenAIServingChat(OpenAIServing):
         num_prompt_tokens = len(final_res.prompt_token_ids)
         prompt_routed_experts = None
         # prompt_moe_topk_indices = None
-        logger.info(f"chat_completion_full_generator: prompt moe topk is None? {final_res.prompt_moe_topk_indices is None}")
+        # logger.info(f"chat_completion_full_generator: prompt moe topk is None? {final_res.prompt_moe_topk_indices is None}")
 
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":
@@ -1412,7 +1412,7 @@ class OpenAIServingChat(OpenAIServing):
                 prompt_routed_experts = output.routed_experts[:num_prompt_tokens].tolist()
             # if output.prompt_moe_topk_indices is not None:
             #     prompt_moe_topk_indices = output.prompt_moe_topk_indices.tolist()
-            logger.info(f"chat_completion_full_generator: output moe topk is None? {output.moe_topk_indices is None}")
+            # logger.info(f"chat_completion_full_generator: output moe topk is None? {output.moe_topk_indices is None}")
 
             if request.logprobs and request.top_logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
