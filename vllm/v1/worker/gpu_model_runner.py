@@ -305,19 +305,6 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
         return self._model_runner_output
 
 
-class ExecuteModelState(NamedTuple):
-    """Ephemeral cached state transferred between execute_model() and
-    sample_tokens(), after execute_model() returns None."""
-
-    scheduler_output: "SchedulerOutput"
-    forward_tensors: "ForwardPassTensors"
-    spec_decode_metadata: SpecDecodeMetadata | None
-    spec_decode_common_attn_metadata: CommonAttentionMetadata | None
-    aux_hidden_states: list[torch.Tensor] | None
-    ec_connector_output: ECConnectorOutput | None
-    cudagraph_stats: CUDAGraphStat | None
-
-
 class ForwardPassTensors(NamedTuple):
     """Intermediate tensors from model forward through logits projection."""
 
@@ -334,8 +321,19 @@ class ModelStepTensors(NamedTuple):
     """Intermediate tensors spanning forward + sampling logprobs."""
 
     forward_tensors: ForwardPassTensors
-    logprobs_tensors: LogprobsTensors | None
-    moe_topk_indices: list[torch.Tensor] | None
+
+
+class ExecuteModelState(NamedTuple):
+    """Ephemeral cached state transferred between execute_model() and
+    sample_tokens(), after execute_model() returns None."""
+
+    scheduler_output: "SchedulerOutput"
+    forward_tensors: ForwardPassTensors
+    spec_decode_metadata: SpecDecodeMetadata | None
+    spec_decode_common_attn_metadata: CommonAttentionMetadata | None
+    aux_hidden_states: list[torch.Tensor] | None
+    ec_connector_output: ECConnectorOutput | None
+    cudagraph_stats: CUDAGraphStat | None
 
 
 class GPUModelRunner(
@@ -2821,7 +2819,7 @@ class GPUModelRunner(
 
         num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
         sampled_token_ids = sampler_output.sampled_token_ids
-        logprobs_tensors = step_tensors.logprobs_tensors
+        logprobs_tensors = sampler_output.logprobs_tensors
         # logprobs_tensors (if present) contain top-k ids/logprobs per token
         # derived from the model logits in the sampler.
         invalid_req_indices = []
@@ -3567,9 +3565,6 @@ class GPUModelRunner(
             # Attach sampler logprobs to the forward-pass tensors so downstream
             # bookkeeping can consume a single combined view.
             forward_tensors=forward_tensors,
-            logprobs_tensors=sampler_output.logprobs_tensors,
-            # Carry MoE top-k indices alongside per-step logprobs tensors.
-            moe_topk_indices=forward_tensors.moe_topk_indices,
         )
 
         self._draft_token_ids = None
@@ -3688,7 +3683,7 @@ class GPUModelRunner(
             async_output = AsyncGPUModelRunnerOutput(
                 model_runner_output=output,
                 sampled_token_ids=sampler_output.sampled_token_ids,
-                logprobs_tensors=step_tensors.logprobs_tensors,
+                logprobs_tensors=sampler_output.logprobs_tensors,
                 invalid_req_indices=invalid_req_indices,
                 async_output_copy_stream=self.async_output_copy_stream,
                 vocab_size=self.input_batch.vocab_size,
@@ -4205,7 +4200,7 @@ class GPUModelRunner(
         spec_decode_metadata: SpecDecodeMetadata | None,
         discard_req_indices: Sequence[int] = (),
     ) -> MoETopkLists | None:
-        moe_topk_indices = step_tensors.moe_topk_indices
+        moe_topk_indices = step_tensors.forward_tensors.moe_topk_indices
         logits_indices = step_tensors.forward_tensors.logits_indices
         if not moe_topk_indices or logits_indices is None:
             return None
